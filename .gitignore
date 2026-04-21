@@ -1,2 +1,7 @@
 ###################
 *.svg
+
+# uv / Python
+.venv/
+__pycache__/
+*.pyc
