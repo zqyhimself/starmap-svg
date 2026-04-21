@@ -29,6 +29,7 @@ coord = "60.186,24.959"
 fullview = False
 guides = False
 constellation = False
+constellation_names = False
 planets = False
 
 #placetext for leftdown corner
@@ -55,12 +56,14 @@ aperture = 0.4
 file1 = "datafiles/ybsc5.txt"
 file2 = "datafiles/extradata.txt" #extra star data for magnitude 6,5 and higher
 file3 = "datafiles/constellation_lines.txt"
+file4 = "datafiles/constellation.txt" #3-letter IAU code -> full name
 
 data = []
 constellation_lines = []
+constellation_name_map = {}
 
-def hours_to_decimal(ra):##use this for ybsc5
-	
+def hours_to_decimal(ra):
+	# Kept for the extradata file where RA is stored as "HH.MMSS" style.
 	seconds  = float(ra[0:2])*60*60 	#hour
 	seconds += float(ra[3:5])*60	#minute
 	seconds += float(ra[5:7])		#seconds
@@ -69,19 +72,31 @@ def hours_to_decimal(ra):##use this for ybsc5
 
 
 def read_ybsc5():
+	# BSC5 byte layout (1-indexed per the catalog spec):
+	#   76-77 RAh  78-79 RAm  80-83 RAs    (J2000)
+	#   84    sign 85-86 DEd  87-88 DEm   89-90 DEs
+	#   103-107 Vmag
 	global data
 	with open(file1, 'rt') as f:
 		for line in f:
-			#RA,DEC,mag,constellation
-
-			if line[75:83].isspace() is False:
-				ra = line[75:77]+'.'+line[77:81]
-				ra = hours_to_decimal(ra)
-				dec = float(line[83:86]+'.'+line[87:90])
-				mag = float(line[103:107])
-				constellation = line[11:14]
-				greek = line[7:10]
-				data.append([ra,dec,mag,constellation,greek])
+			if line[75:83].isspace():
+				continue
+			try:
+				rah = int(line[75:77])
+				ram = int(line[77:79])
+				ras = float(line[79:83])
+				sign = -1.0 if line[83] == '-' else 1.0
+				ded = int(line[84:86])
+				dem = int(line[86:88])
+				des = int(line[88:90])
+				mag = float(line[102:107])
+			except ValueError:
+				continue
+			ra_deg  = (rah + ram/60.0 + ras/3600.0) * 15.0
+			dec_deg = sign * (ded + dem/60.0 + des/3600.0)
+			constellation = line[11:14]
+			greek = line[7:10]
+			data.append([ra_deg, dec_deg, mag, constellation, greek])
 				
 
 def read_extra_star_coordinate_file():
@@ -104,6 +119,15 @@ def read_constellation_file():
 			tmp[3] = float(tmp[3])*360/24
 			tmp[4] = float(tmp[4])
 			constellation_lines.append(tmp)
+
+
+def read_constellation_names():
+	"""Load 3-letter IAU code -> full name mapping into constellation_name_map."""
+	with open(file4, 'rt') as f:
+		for line in f:
+			parts = line.strip().split(None, 1)
+			if len(parts) == 2:
+				constellation_name_map[parts[0]] = parts[1]
 
 
 
@@ -350,6 +374,7 @@ parser.add_argument('-magn','--magn',nargs='?', help='magnitude limit 0.1-12.0',
 parser.add_argument('-summertime','--summertime',nargs='?', help='summertime/DST: auto (default), true, false',type=_parse_summertime_arg, default=summertime, const='auto')
 parser.add_argument('-guides','--guides',nargs='?', help='draw guides True/False',type=bool, default=guides )
 parser.add_argument('-constellation','--constellation',nargs='?', help='show constellation True/False',type=bool, default=constellation )
+parser.add_argument('-constellation_names','--constellation_names',nargs='?', help='print constellation full names True/False',type=_parse_bool_arg, default=constellation_names, const=True)
 parser.add_argument('-planets','--planets',nargs='?', help='draw planets, Sun and Moon True/False',type=_parse_bool_arg, default=planets, const=True)
 parser.add_argument('-o','--output', help='output filename.svg',default='starmap.svg' )
 parser.add_argument('-width','--width',nargs='?', help='width in mm',type=int, default=width)
@@ -368,6 +393,7 @@ output_file = args.output
 guides = args.guides
 magnitude_limit = args.magn
 constellation = args.constellation
+constellation_names = args.constellation_names
 summertime = args.summertime
 planets = args.planets
 
@@ -420,51 +446,58 @@ def draw_line(x0,y0,x1,y1,color):
 
 ########## TIME CALCULATION  ###########################################
 
-#date to days
-def date_and_time_to_rad(date,time):
+# The projection is centered at the observer's (latitude, longitude). For a
+# star to land at zenith when it crosses the local meridian, we need the
+# per-frame offset added to every star's RA to equal -GMST (Greenwich Mean
+# Sidereal Time). Then lon0 - lon in the stereographic projection works out
+# to the local hour angle.
 
-	#J2000 Epoch 01.01.2000 12.00.00
-	epochyear = 2000.0
-	epochhour = 12.0
-
-	calculation_mistake = -5.1
-
-	days_in_year = 365.2425
-	months = [31,28,31,30,31,30,31,31,30,31,30,31] #Array of days in months
-
-	year = int(date[6:10])
-	month  = int(date[3:5])
-	day    = int(date[0:2])
-	hour   = float(time[0:2])
-	minute = float(time[3:5])
-	second = float(time[6:8])
-
-	#years to days
-	daycounter = (year-epochyear)*days_in_year
-	#month to days
-	daycounter  += sum(months[0:month-1])	
-	#days
-	daycounter += day-1				
-
-	secondcounter  = (hour- epochhour+ calculation_mistake)*60*60
-	secondcounter  += minute*60
-	secondcounter += second			
-	
-	#Summertime
-	if(summertime):
-		secondcounter -= (60*60)
-	
-	#UTC
-	secondcounter -= (60*60*utc)
+def _gmst_radians(date_str, time_str, utc_offset, dst_hour):
+	"""Greenwich Mean Sidereal Time as an angle in radians."""
+	d = _schlyter_day(date_str, time_str, utc_offset, dst_hour)
+	# Schlyter's d = JD - 2451543.5, so days since J2000.0 UT = d - 1.5
+	t = d - 1.5
+	# Standard low-precision GMST (IAU 1982, fine for a poster starmap):
+	gmst_deg = (280.46061837 + 360.9856473662 * t) % 360
+	return math.radians(gmst_deg)
 
 
-	#calculate degree from days
-	degree = -((daycounter)*360.0/days_in_year) % 360
+def date_and_time_to_rad(date, time):
+	"""Per-frame RA offset (= -GMST) in radians."""
+	dst_hour = 1 if summertime else 0
+	return -_gmst_radians(date, time, utc, dst_hour)
 
-	#calculate degree from seconds
-	degree -= ((secondcounter)*360/(24*60*60)) % 360
 
-	return math.radians(degree)
+def julian_centuries_since_j2000(date_str, time_str, utc_offset, dst_hour):
+	"""Julian centuries from J2000.0 UT — used by the precession transform."""
+	d = _schlyter_day(date_str, time_str, utc_offset, dst_hour)
+	return (d - 1.5) / 36525.0
+
+
+def precess_j2000_to_date(ra_rad, dec_rad, T):
+	"""Apply J2000 -> epoch-of-date precession (Meeus ch.21, rigorous form)."""
+	# Precession angles in arcseconds
+	zeta  = (2306.2181*T + 0.30188*T*T + 0.017998*T*T*T)
+	z     = (2306.2181*T + 1.09468*T*T + 0.018203*T*T*T)
+	theta = (2004.3109*T - 0.42665*T*T - 0.041833*T*T*T)
+	# Arcseconds -> radians
+	as_to_rad = math.pi / (180.0 * 3600.0)
+	zeta  *= as_to_rad
+	z     *= as_to_rad
+	theta *= as_to_rad
+
+	cos_dec = math.cos(dec_rad)
+	sin_dec = math.sin(dec_rad)
+	cos_ra_zeta = math.cos(ra_rad + zeta)
+	sin_ra_zeta = math.sin(ra_rad + zeta)
+
+	A = cos_dec * sin_ra_zeta
+	B = math.cos(theta) * cos_dec * cos_ra_zeta - math.sin(theta) * sin_dec
+	C = math.sin(theta) * cos_dec * cos_ra_zeta + math.cos(theta) * sin_dec
+
+	ra_new = (math.atan2(A, B) + z) % (2.0 * math.pi)
+	dec_new = math.asin(max(-1.0, min(1.0, C)))
+	return ra_new, dec_new
 
 
 ########## GEOMETRY CALCULATION  ###########################################
@@ -507,6 +540,8 @@ def generate_starmap(northern_N,eastern_E,date,time):
 	E = math.radians(eastern_E)
 
 	raddatetime = date_and_time_to_rad(date,time)
+	dst_hour = 1 if summertime else 0
+	T_prec = julian_centuries_since_j2000(date, time, utc, dst_hour)
 	
 	if(guides is True):
 		draw_guides = []
@@ -540,9 +575,13 @@ def generate_starmap(northern_N,eastern_E,date,time):
 	for line in data:
 		if(line[2] < magnitude_limit):
 
-			#star position from datafile
-			ascension = right_ascension_to_rad(line[0])+raddatetime
-			declination = declination_to_rad(line[1])
+			#star position from datafile (J2000) -> epoch of date
+			ra_j2000  = right_ascension_to_rad(line[0])
+			dec_j2000 = declination_to_rad(line[1])
+			ra_now, dec_now = precess_j2000_to_date(ra_j2000, dec_j2000, T_prec)
+
+			ascension = ra_now + raddatetime
+			declination = dec_now
 
 			x,y = stereographic(N,E, declination, ascension, width-(borders))
 
@@ -569,26 +608,63 @@ def generate_starmap(northern_N,eastern_E,date,time):
 				print(counter)
 
 
+def _project_constellation_endpoint(N, E, ra_deg, dec_deg, raddatetime, T_prec):
+	"""Apply precession + time offset + stereographic projection to one endpoint."""
+	ra_j2000  = math.radians(ra_deg)
+	dec_j2000 = math.radians(dec_deg)
+	ra_now, dec_now = precess_j2000_to_date(ra_j2000, dec_j2000, T_prec)
+	ascension = ra_now + raddatetime
+	x, y = stereographic(N, E, dec_now, ascension, width - borders)
+	angle = angle_between(N, E, dec_now, ascension)
+	return x, y, angle
+
+
 def generate_constellations(northern_N,eastern_E,date,time):
 	N = math.radians(northern_N)
 	E = math.radians(eastern_E)
 
 	raddatetime = date_and_time_to_rad(date,time)
-	
+	dst_hour = 1 if summertime else 0
+	T_prec = julian_centuries_since_j2000(date, time, utc, dst_hour)
+
 	for line in constellation_lines:
-		ascension0 = right_ascension_to_rad(line[1])+raddatetime
-		declination0 = declination_to_rad(line[2])
-		x0,y0 = stereographic(N,E, declination0, ascension0, width-(borders))
+		x0, y0, a0 = _project_constellation_endpoint(N, E, line[1], line[2], raddatetime, T_prec)
+		x1, y1, a1 = _project_constellation_endpoint(N, E, line[3], line[4], raddatetime, T_prec)
 
-		ascension1 = right_ascension_to_rad(line[3])+raddatetime
-		declination1 = declination_to_rad(line[4])
-		x1,y1 = stereographic(N,E, declination1, ascension1, width-(borders))
+		if (a0 <= math.radians(90) and a1 <= math.radians(90)) or fullview:
+			draw_line(half_x-x0, half_y-y0, half_x-x1, half_y-y1, line_color)
 
-		angle_from_viewpoint1 = angle_between(N,E,declination0,ascension0)
-		angle_from_viewpoint2 = angle_between(N,E,declination1,ascension1)
 
-		if ((angle_from_viewpoint1 <= math.radians(90))  and (angle_from_viewpoint2 <= math.radians(90)) or fullview):
-			draw_line(half_x-x0,half_y-y0,half_x-x1,half_y-y1,line_color)
+def generate_constellation_names(northern_N, eastern_E, date, time):
+	"""Print each constellation's full name at the centroid of its visible segments."""
+	N = math.radians(northern_N)
+	E = math.radians(eastern_E)
+
+	raddatetime = date_and_time_to_rad(date, time)
+	dst_hour = 1 if summertime else 0
+	T_prec = julian_centuries_since_j2000(date, time, utc, dst_hour)
+
+	# Collect visible endpoints grouped by 3-letter IAU code.
+	groups = {}
+	for line in constellation_lines:
+		code = line[0]
+		for ra_deg, dec_deg in ((line[1], line[2]), (line[3], line[4])):
+			x, y, angle = _project_constellation_endpoint(N, E, ra_deg, dec_deg, raddatetime, T_prec)
+			if angle <= math.radians(90) or fullview:
+				groups.setdefault(code, []).append((half_x - x, half_y - y))
+
+	name_style = "font-size:3px; letter-spacing:1.5px; font-family:sans-serif; stroke-width:0; opacity:0.55;"
+	for code, pts in groups.items():
+		if len(pts) < 3:
+			# Too few visible endpoints -> likely at the horizon, label would be misleading.
+			continue
+		cx = sum(p[0] for p in pts) / len(pts)
+		cy = sum(p[1] for p in pts) / len(pts)
+		name = constellation_name_map.get(code, code).upper()
+		image.add(image.text(
+			name, insert=(cx, cy),
+			text_anchor='middle',
+			fill=constellation_color, style=name_style))
 
 def generate_planets(northern_N,eastern_E,date,time):
 	"""Draw Sun, Moon and the classical + outer planets for the given moment."""
@@ -631,6 +707,7 @@ if __name__ == '__main__':
 	read_ybsc5()
 	read_extra_star_coordinate_file()
 	read_constellation_file()
+	read_constellation_names()
 
 	half_x = mm_to_px(width/2)
 	half_y = mm_to_px(height/2)
@@ -645,6 +722,8 @@ if __name__ == '__main__':
 	generate_starmap(northern,eastern,date,time)
 	if constellation:
 		generate_constellations(northern,eastern,date,time)
+	if constellation_names:
+		generate_constellation_names(northern,eastern,date,time)
 	if planets:
 		generate_planets(northern,eastern,date,time)
 
