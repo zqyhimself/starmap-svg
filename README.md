@@ -22,11 +22,13 @@ for generating svg starmaps from selected coordinates and time
 	  -magn [MAGN], --magn [MAGN]
 	                        magnitude limit 0.1-12.0
 	  -summertime [SUMMERTIME], --summertime [SUMMERTIME]
-	                        if it is summertime on the date of the starchart
+	                        summertime/DST: auto (default), true, false
 	  -guides [GUIDES], --guides [GUIDES]
 	                        draw guides True/False
 	  -constellation [CONSTELLATION], --constellation [CONSTELLATION]
 	                        show constellation True/False
+	  -planets [PLANETS], --planets [PLANETS]
+	                        draw Sun, Moon and planets True/False
 	  -o OUTPUT, --output OUTPUT
 	                        output filename.svg
 	  -width [WIDTH], --width [WIDTH]
@@ -55,5 +57,12 @@ for generating svg starmaps from selected coordinates and time
 Stars data: "Yale Bright Star Catalog ver5"
 http://tdc-www.harvard.edu/catalogs/bsc5.html
 
-## TODO
-	Planets and Moon orbits, Automated summertime.
+Planet / Sun / Moon positions are computed with the simplified Keplerian
+algorithm from Paul Schlyter's "How to compute planetary positions"
+(http://stjarnhimlen.se/comp/ppcomp.html), including the main solar
+perturbations of the Moon.
+
+Automated summertime applies the EU rule in the northern hemisphere
+(last Sunday of March → last Sunday of October) and the AU-style rule
+in the southern hemisphere (first Sunday of October → first Sunday of
+April). Pass `-summertime true|false` to override.
